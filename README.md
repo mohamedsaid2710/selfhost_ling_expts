@@ -112,6 +112,10 @@ To stop the server, press Ctrl-C in the shell.
 
 When starting the server with `make start`, the process id (PID) of the server will be stored in `nohup.pid` and log messages, including errors, in `nohup.out`.
 
+The `Makefile` in each experiment directory starts `../server.py` from inside that directory, because the server serves the files of the directory it is started in.
+
+The server listens on port 80 (or 443 with `cert.pem` and `key.pem`), which normally requires root privileges.  Instead of running the server as root, `make start` and `make test` give the Python interpreter permission to use these ports (`sudo setcap CAP_NET_BIND_SERVICE=+eip …`).  This is done only once, which is why the password is requested only the first time.
+
 ## Acknowledgements
 
 Thanks go to Judith Tonhauser, who provided useful comments and suggestions and helped test some of the software in this repository.
