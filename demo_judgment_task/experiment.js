@@ -68,8 +68,6 @@ pages.push({
   execute_script: true,
 });
 
-// `)});
-
 // Brief survey on English exposure:
 pages.push({
   type: jsPsychHtmlKeyboardResponse,

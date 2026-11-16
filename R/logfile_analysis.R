@@ -1,72 +1,79 @@
 
-library(tidyverse)
-
+# Summarize the server's log file: how often the experiment was opened and
+# how often results were submitted.
+#
+# Usage, from the top of the repository:
+#
+#   Rscript R/logfile_analysis.R demo_selfpacedreading/nohup.out
+#
+# or from inside an experiment's directory:  Rscript ../R/logfile_analysis.R
+# (the log file defaults to ./nohup.out).
+#
+# Base R only, so it runs on any machine with R and nothing to install.
+#
 # Be advised that the log file's structure is messy due to its
 # inconsistent format and potential disruptions from hacking attempts.
 # The analyses below are provided with an understanding of these
 # uncertainties and should not be interpreted as precise.
 
-setwd("R")
+args <- commandArgs(trailingOnly = TRUE)
+log_path <- if (length(args) >= 1) args[1] else "nohup.out"
+if (!file.exists(log_path)) stop("No log file '", log_path, "'.")
 
-# Remove obvious hacking attempts and error messages (which do not
-# follow the standard access log format):
-system("grep -a ' - - ' nohup.out > nohup_filtered.out")
+# Keep only lines in the standard access log format, e.g.
+#
+#   203.0.113.7 - - [2026-11-16 10:26:44] "GET / HTTP/1.1" 200 1498 0.002282
+#
+# This removes the server's own messages and obvious hacking attempts
+# (which do not follow that format).
+lines <- readLines(log_path, warn = FALSE, encoding = "UTF-8")
+lines <- iconv(lines, "UTF-8", "UTF-8", sub = "?")
+pattern <- '^(\\S+) - - \\[([^]]+)\\] "([^"]*)" ([0-9]{3}) (\\S+) (\\S+)$'
+access <- lines[grepl(pattern, lines)]
+if (length(access) == 0) stop("No access log lines in '", log_path, "'.")
 
-c(100, 101, 102, 103, 122,
-  200, 201, 202, 203, 204, 205, 206, 207, 208, 226,
-  300, 301, 302, 303, 304, 305, 306, 307, 308,
-  400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412,
-    413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425,
-    426, 427, 428, 429, 430, 431, 451,
-  500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511) -> http_response_codes
+d <- data.frame(
+  IP       = sub(pattern, "\\1", access),
+  datetime = as.POSIXct(sub(pattern, "\\2", access), format = "%Y-%m-%d %H:%M:%S"),
+  request  = sub(pattern, "\\3", access),
+  code     = sub(pattern, "\\4", access),
+  stringsAsFactors = FALSE)
 
-# Read filtered nohub.out:
+message(length(access), " of ", length(lines), " lines are access log lines, from ",
+        format(min(d$datetime, na.rm = TRUE)), " to ", format(max(d$datetime, na.rm = TRUE)), ".")
 
-read_delim("nohup_filtered.out", delim=" ", quote="\"",
-           escape_backslash=FALSE, escape_double=FALSE,
-           col_names=c("IP", "client", "userid", "date", "time", "request",
-                       "code", "size", "latency")) |>
-  mutate(
-    datetime = paste(date, time),
-    datetime = as.POSIXct(datetime, format="[%Y-%m-%d %H:%M:%S]"),
-    code = factor(code, levels=http_response_codes)) |>
-  select(-date, -time) -> d
-head(d)
+# Tally of HTTP response codes:
+message("\nHTTP response codes:")
+print(table(code = d$code))
 
-# Tally of HTTP response codes (anything that didn't look like a HTTP
-# response code is NA):
-table(d$code) |> (\(x) x[x!=0])()
+# How many times was the experiment requested?  Counting successful requests
+# for the start page.  The server marks every response as uncacheable, so
+# each time a participant opens or reloads the experiment is counted.
+ok <- d$code == "200"
+d.loads <- d[ok & grepl("^GET / ", d$request), ]
+message("\nExperiment opened: ", nrow(d.loads), " time(s), from ",
+        length(unique(d.loads$IP)), " IP address(es).")
 
-# How many times was the experiment requested (counting access to
-# jquery but ignoring cache hits):
-d |>
-  filter(code %in% "200") |>
-  filter(request == "GET /shared/js/jquery-1.11.1.min.js HTTP/1.1") ->
-  d.jquery
-nrow(d.jquery)
+# How many times were results submitted for storage?  Counting successful
+# requests to /store; the questionnaire (kind=survey) is sent separately and
+# is not counted a second time.
+d.store <- d[ok & grepl("^POST /store", d$request) & !grepl("kind=survey", d$request), ]
+message("Results submitted: ", nrow(d.store), " time(s), from ",
+        length(unique(d.store$IP)), " IP address(es).")
 
-# How many times was the data submitted for storage (counting access to
-# /store):
-d |>
-  filter(code %in% "200") |>
-  filter(request == "POST /store HTTP/1.1") ->
-  d.store
-nrow(d.store)
+# IP addresses that opened the experiment multiple times.  Some do so within
+# a short interval (perhaps trying a different browser), some at larger
+# intervals up to multiple days.
+repeated <- d.loads[duplicated(d.loads$IP) | duplicated(d.loads$IP, fromLast = TRUE), ]
+if (nrow(repeated) > 0) {
+  message("\nIP addresses that opened the experiment more than once:")
+  print(repeated[order(repeated$IP, repeated$datetime), c("IP", "datetime")], row.names = FALSE)
+}
 
-# IP addresses that downloaded jquery multiple times:
-d.jquery[duplicated(d.jquery$IP) | duplicated(d.jquery$IP, fromLast=TRUE),] |>
-  arrange(IP, datetime)
-# Some downloaded it in a short interval (perhaps trying a different
-# browser), some in larger intervals up to multiple days.
-
-# How many non-cached loads of the experiment resulted in data being
-# submitted?  We're assuming that each participant has a unique IP
-# address and participated only once.  (We can't distinguish multiple
-# clients who're using the same IP.)
-
-d.jquery |>
-  distinct(IP, .keep_all=TRUE) |>
-  mutate(stored_data = IP %in% unique(d.store$IP)) |>
-  group_by(stored_data) |>
-  summarize(
-    n = length(code))
+# How many of those who opened the experiment submitted results?  We're
+# assuming that each participant has a unique IP address and participated
+# only once.  (We can't distinguish multiple clients who're using the same
+# IP.)
+opened <- unique(d.loads$IP)
+message("\nOf the IP addresses that opened the experiment, how many submitted results:")
+print(table(stored_data = opened %in% d.store$IP))
